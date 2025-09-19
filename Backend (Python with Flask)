@@ -1,0 +1,165 @@
+pip install Flask psycopg2-binary
+# app.py
+
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import psycopg2
+from psycopg2 import extras
+import os
+
+app = Flask(__name__)
+CORS(app)  # This allows cross-origin requests from your frontend
+
+# Database connection details from environment variables
+DB_HOST = os.environ.get('DB_HOST', 'localhost')
+DB_NAME = os.environ.get('DB_NAME', 'event_db')
+DB_USER = os.environ.get('DB_USER', 'postgres')
+DB_PASSWORD = os.environ.get('DB_PASSWORD', 'your_password')
+
+def get_db_connection():
+    """Establishes a connection to the PostgreSQL database."""
+    conn = psycopg2.connect(
+        host=DB_HOST,
+        database=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD
+    )
+    return conn
+
+# --- API Endpoints for CRUD Operations ---
+
+# GET: List all events
+@app.route('/api/events', methods=['GET'])
+def get_events():
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cur.execute("SELECT * FROM events;")
+    events = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify([dict(event) for event in events])
+
+# POST: Create a new event
+@app.route('/api/events', methods=['POST'])
+def create_event():
+    new_event = request.json
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "INSERT INTO events (user_id, event_name, event_date, event_time, location, description) VALUES (%s, %s, %s, %s, %s, %s) RETURNING event_id;",
+            (new_event['user_id'], new_event['event_name'], new_event['event_date'], new_event['event_time'], new_event['location'], new_event['description'])
+        )
+        event_id = cur.fetchone()[0]
+        conn.commit()
+        return jsonify({'message': 'Event created successfully!', 'event_id': event_id}), 201
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+# GET: Dashboard data for a specific event
+@app.route('/api/events/<int:event_id>/dashboard', methods=['GET'])
+def get_event_dashboard(event_id):
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    try:
+        # Get basic event details
+        cur.execute("SELECT * FROM events WHERE event_id = %s;", (event_id,))
+        event = cur.fetchone()
+
+        # Get ticket sales data
+        cur.execute(
+            """
+            SELECT tt.type_name, tt.price, SUM(r.purchase_quantity) AS tickets_sold,
+                   (tt.price * SUM(r.purchase_quantity)) AS total_revenue
+            FROM ticket_types tt
+            JOIN registrations r ON tt.ticket_type_id = r.ticket_type_id
+            WHERE tt.event_id = %s
+            GROUP BY tt.ticket_type_id, tt.type_name;
+            """,
+            (event_id,)
+        )
+        ticket_sales = cur.fetchall()
+
+        # Get registered attendees
+        cur.execute(
+            """
+            SELECT a.name, a.email, tt.type_name
+            FROM attendees a
+            JOIN registrations r ON a.attendee_id = r.attendee_id
+            JOIN ticket_types tt ON r.ticket_type_id = tt.ticket_type_id
+            WHERE tt.event_id = %s;
+            """,
+            (event_id,)
+        )
+        attendees = cur.fetchall()
+
+        dashboard_data = {
+            'event': dict(event),
+            'ticket_sales': [dict(sale) for sale in ticket_sales],
+            'attendees': [dict(attendee) for attendee in attendees]
+        }
+        return jsonify(dashboard_data)
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+# POST: Process a ticket purchase (demonstrates ACID compliance)
+@app.route('/api/register', methods=['POST'])
+def register_attendee():
+    data = request.json
+    attendee_name = data['attendee_name']
+    attendee_email = data['attendee_email']
+    ticket_type_id = data['ticket_type_id']
+    purchase_quantity = data['purchase_quantity']
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        # Begin a transaction
+        conn.autocommit = False
+
+        # Step 1: Check ticket availability and lock the row (FOR UPDATE)
+        cur.execute("SELECT quantity_available FROM ticket_types WHERE ticket_type_id = %s FOR UPDATE;", (ticket_type_id,))
+        result = cur.fetchone()
+        if not result or result[0] < purchase_quantity:
+            conn.rollback()
+            return jsonify({'message': 'Not enough tickets available.'}), 400
+
+        # Step 2: Create a new attendee or find existing one
+        cur.execute("INSERT INTO attendees (name, email) VALUES (%s, %s) ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name RETURNING attendee_id;", (attendee_name, attendee_email))
+        attendee_id = cur.fetchone()[0]
+
+        # Step 3: Insert the registration record
+        cur.execute(
+            "INSERT INTO registrations (attendee_id, ticket_type_id, purchase_quantity) VALUES (%s, %s, %s);",
+            (attendee_id, ticket_type_id, purchase_quantity)
+        )
+
+        # Step 4: Decrement the available ticket count
+        cur.execute(
+            "UPDATE ticket_types SET quantity_available = quantity_available - %s WHERE ticket_type_id = %s;",
+            (purchase_quantity, ticket_type_id)
+        )
+
+        # If all steps are successful, commit the transaction
+        conn.commit()
+        return jsonify({'message': 'Registration successful!', 'attendee_id': attendee_id}), 201
+
+    except Exception as e:
+        # If any step fails, roll back the transaction
+        conn.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+if __name__ == '__main__':
+    app.run(debug=True)
