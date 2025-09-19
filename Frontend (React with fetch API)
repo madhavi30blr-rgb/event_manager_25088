@@ -1,0 +1,134 @@
+npx create-react-app frontend
+cd frontend
+npm install
+// App.js
+
+import React, { useState, useEffect } from 'react';
+import './App.css';
+
+function App() {
+  const [events, setEvents] = useState([]);
+  const [selectedEvent, setSelectedEvent] = useState(null);
+  const [dashboardData, setDashboardData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const API_URL = 'http://localhost:5000/api'; // Update if your backend runs on a different port
+
+  // Fetch all events
+  useEffect(() => {
+    fetchEvents();
+  }, []);
+
+  const fetchEvents = async () => {
+    try {
+      const response = await fetch(`${API_URL}/events`);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      setEvents(data);
+    } catch (e) {
+      setError('Failed to fetch events.');
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Fetch dashboard data for a specific event
+  const fetchDashboardData = async (eventId) => {
+    setSelectedEvent(eventId);
+    setDashboardData(null);
+    try {
+      const response = await fetch(`${API_URL}/events/${eventId}/dashboard`);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      setDashboardData(data);
+    } catch (e) {
+      setError('Failed to fetch dashboard data.');
+      console.error(e);
+    }
+  };
+
+  if (loading) return <div>Loading events...</div>;
+  if (error) return <div>Error: {error}</div>;
+
+  return (
+    <div className="App">
+      <header className="App-header">
+        <h1>Event Management Dashboard</h1>
+        <p>Managed by [Your Name], Roll No: [Your Roll No]</p>
+      </header>
+
+      <main>
+        <h2>Select an Event</h2>
+        <div className="event-list">
+          {events.length > 0 ? (
+            events.map(event => (
+              <button key={event.event_id} onClick={() => fetchDashboardData(event.event_id)}>
+                {event.event_name}
+              </button>
+            ))
+          ) : (
+            <p>No events found.</p>
+          )}
+        </div>
+
+        {dashboardData && (
+          <div className="dashboard-container">
+            <h3>Dashboard for {dashboardData.event.event_name}</h3>
+            
+            <div className="dashboard-section">
+              <h4>Ticket Sales & Revenue</h4>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Ticket Type</th>
+                    <th>Tickets Sold</th>
+                    <th>Total Revenue</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dashboardData.ticket_sales.map((sale, index) => (
+                    <tr key={index}>
+                      <td>{sale.type_name}</td>
+                      <td>{sale.tickets_sold}</td>
+                      <td>${parseFloat(sale.total_revenue).toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="dashboard-section">
+              <h4>Registered Attendees</h4>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Email</th>
+                    <th>Ticket Type</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dashboardData.attendees.map((attendee, index) => (
+                    <tr key={index}>
+                      <td>{attendee.name}</td>
+                      <td>{attendee.email}</td>
+                      <td>{attendee.type_name}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+export default App;
